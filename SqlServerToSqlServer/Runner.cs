@@ -22,7 +22,7 @@ namespace SqlServerToSqlServer
                 await sourceConnection.OpenAsync();
                 using var sourceCommand = sourceConnection.CreateCommand();
                 sourceCommand.CommandType = CommandType.Text;
-                sourceCommand.CommandText = $"SELECT {string.Join(",", _mapperConfig.MapperName.Select(s => s.SourceName))} FROM {_mapperConfig.SourceTableName}";
+                sourceCommand.CommandText = $"SELECT {string.Join(",", _mapperConfig.MapperName.Select(s => s.SourceName))} FROM {_mapperConfig.SourceTableName} (NOLOCK)";
                 using var sourceReader = await sourceCommand.ExecuteReaderAsync();
 
                 using var targetDataTable = new DataTable();
@@ -59,7 +59,7 @@ namespace SqlServerToSqlServer
                         if (!sourceReader.IsDBNull(f.SourceName))
                         {
                             // MapperType
-                            targetDataRow[f.SourceName] = MapperValue(sourceReader, f);
+                            targetDataRow[f.TargetName] = MapperValue(sourceReader, f);
                         }
                     });
                     targetDataTable.Rows.Add(targetDataRow);
@@ -85,17 +85,17 @@ namespace SqlServerToSqlServer
             {
                 case MapperType.None:
                     {
-                        return reader.GetValue(mapper.TargetName);
+                        return reader.GetValue(mapper.SourceName);
                     }
                 case MapperType.RocDateStringToAdDateTime:
                     {
-                        var value = reader.GetString(mapper.TargetName);
+                        var value = reader.GetString(mapper.SourceName);
                         var datetimeInt = Convert.ToInt32(value) + 19110000;
                         return DateTime.Parse(datetimeInt.ToString("0000-00-00"));
                     }
                 default:
                     {
-                        return reader.GetValue(mapper.TargetName);
+                        return reader.GetValue(mapper.SourceName);
                     }
             }
         }

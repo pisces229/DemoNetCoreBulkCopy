@@ -37,7 +37,6 @@ hostbuilder.ConfigureServices((hostContext, services) =>
 using var host = hostbuilder.Build();
 
 var appOption = host.Services.GetRequiredService<IOptions<AppOption>>().Value;
-Console.WriteLine("Start...");
 var ouput = Directory.CreateDirectory($"{appOption.Output}.{DateTime.Now:yyyyMMdd.HHmmss}");
 var csvConfiguration = new CsvConfiguration(CultureInfo.InvariantCulture)
 {
@@ -45,6 +44,9 @@ var csvConfiguration = new CsvConfiguration(CultureInfo.InvariantCulture)
     HasHeaderRecord = false,
 };
 var tasks = new List<Task>();
+
+Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]:Start");
+File.AppendAllText($"{Path.Combine($"{ouput.FullName}", "Log")}.log", $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]:Start\n");
 foreach (var file in appOption.Files)
 {
     var mapperConfig = new MapperConfig()
@@ -67,4 +69,5 @@ foreach (var file in appOption.Files)
     tasks.Add(runner.Run());
 }
 Task.WaitAll(tasks.ToArray());
-Console.WriteLine("...Start");
+Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]:Stop");
+File.AppendAllText($"{Path.Combine($"{ouput.FullName}", "Log")}.log", $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]:Stop\n");

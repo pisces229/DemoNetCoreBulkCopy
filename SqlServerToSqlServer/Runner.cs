@@ -1,45 +1,87 @@
-﻿using Microsoft.Data.SqlClient;
+﻿using CsvHelper;
+using CsvHelper.Configuration;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Options;
 using System.Data;
-using System.Text;
+using System.Globalization;
 
 namespace SqlServerToSqlServer
 {
     internal class Runner
     {
-        private readonly MapperConfig _mapperConfig;
-        public Runner(MapperConfig mapperConfig)
+        private readonly AppOption _appOption;
+        public Runner(IOptions<AppOption> appOption)
         {
-            _mapperConfig = mapperConfig;
+            _appOption = appOption.Value;
         }
-        public async Task Run()
+        public async Task<long> Run(ThreadOption threadOption)
         {
+            var result = 0L;
+            var infoLog = $"{Path.Combine($"{_appOption.Output}", $"app.{threadOption.Name}")}.log";
+            var errorLog = $"{Path.Combine($"{_appOption.Output}", $"app.{threadOption.Name}")}.error";
+            await Utility.Log(infoLog, threadOption.Name, "[Start]");
+            var csvConfiguration = new CsvConfiguration(CultureInfo.InvariantCulture)
+            {
+                Delimiter = ",",
+                HasHeaderRecord = false,
+            }; 
+            var tasks = new List<Task<long>>();
+            foreach (var file in threadOption.Files)
+            {
+                try
+                {
+                    using var streamReader = new StreamReader(Path.Combine(_appOption.Input, $"{file}.csv"));
+                    using var csvReader = new CsvReader(streamReader, csvConfiguration);
+                    var records = csvReader.GetRecords<MapperName>().ToList();
+                    tasks.Add(Run(
+                        threadOption.Name,
+                        records.First().SourceName,
+                        records.First().TargetName,
+                        records.Skip(1).ToList()
+                    ));
+                }
+                catch (Exception e)
+                {
+                    await Utility.Log(errorLog, threadOption.Name, e.ToString());
+                }
+            }
+            Task.WaitAll(tasks.ToArray());
+            foreach (var task in tasks) 
+            {
+                result += await task;
+            }
+            await Utility.Log(infoLog, threadOption.Name, $"[Complete][{result}]");
+            await Utility.Log(infoLog, threadOption.Name, "[Stop]");
+            return result;
+        }
+        private async Task<long> Run(string threadName, string sourectTable, string targetTable, List<MapperName> mapperName)
+        {
+            var result = 0L;
+            var infoLog = $"{Path.Combine($"{_appOption.Output}", $"dbo.{targetTable}")}.log";
+            var errorLog = $"{Path.Combine($"{_appOption.Output}", $"dbo.{targetTable}")}.error";
+            await Utility.Log(infoLog, $"{threadName}][{sourectTable}][{targetTable}", "[Start]");
             try
             {
-                Log($"Start");
-                var count = 0;
-
-                using var sourceConnection = new SqlConnection(_mapperConfig.SourceConnectionString);
+                using var sourceConnection = new SqlConnection(_appOption.SourceConnectionString);
                 await sourceConnection.OpenAsync();
                 using var sourceCommand = sourceConnection.CreateCommand();
                 sourceCommand.CommandType = CommandType.Text;
-                sourceCommand.CommandText = $"SELECT {string.Join(",", _mapperConfig.MapperName.Select(s => s.SourceName))} FROM {_mapperConfig.SourceTableName} (NOLOCK)";
+                sourceCommand.CommandText = $"SELECT {string.Join(",", mapperName.Select(s => s.SourceName))} FROM {sourectTable} (NOLOCK)";
                 using var sourceReader = await sourceCommand.ExecuteReaderAsync();
-
                 using var targetDataTable = new DataTable();
-                _mapperConfig.MapperName.ForEach(f => targetDataTable.Columns.Add(f.TargetName));
-
-                using var targetConnection = new SqlConnection(_mapperConfig.TargetConnectionString);
+                mapperName.ForEach(f => targetDataTable.Columns.Add(f.TargetName));
+                using var targetConnection = new SqlConnection(_appOption.TargetConnectionString);
                 await targetConnection.OpenAsync();
                 using var targetSqlBulkCopy = new SqlBulkCopy(targetConnection)
                 {
-                    BatchSize = _mapperConfig.BatchSize,
-                    NotifyAfter = _mapperConfig.ReadSize,
+                    BatchSize = _appOption.BatchSize,
+                    NotifyAfter = _appOption.ReadSize,
                     BulkCopyTimeout = 0,
-                    DestinationTableName = $"dbo.{_mapperConfig.TargetTableName}",
+                    DestinationTableName = $"dbo.{targetTable}",
                 };
-                targetSqlBulkCopy.SqlRowsCopied += (sender, args) =>
+                targetSqlBulkCopy.SqlRowsCopied += async (sender, args) =>
                 {
-                    Log($"Write[{args.RowsCopied}]");
+                    await Utility.Log(infoLog, $"{threadName}][{sourectTable}][{targetTable}", $"[Write][{args.RowsCopied}]");
                 };
                 foreach (DataColumn dataColumn in targetDataTable.Columns)
                 {
@@ -47,62 +89,37 @@ namespace SqlServerToSqlServer
                 }
                 while (await sourceReader.ReadAsync())
                 {
-                    if (targetDataTable.Rows.Count == _mapperConfig.ReadSize)
+                    if (targetDataTable.Rows.Count == _appOption.ReadSize)
                     {
-                        count += targetDataTable.Rows.Count;
+                        result += targetDataTable.Rows.Count;
                         await targetSqlBulkCopy.WriteToServerAsync(targetDataTable);
                         targetDataTable.Rows.Clear();
                     }
                     var targetDataRow = targetDataTable.NewRow();
-                    _mapperConfig.MapperName.ForEach(f =>
+                    mapperName.ForEach(f =>
                     {
                         if (!sourceReader.IsDBNull(f.SourceName))
                         {
                             // MapperType
-                            targetDataRow[f.TargetName] = MapperValue(sourceReader, f);
+                            targetDataRow[f.TargetName] = Utility.MapperValue(sourceReader, f);
                         }
                     });
                     targetDataTable.Rows.Add(targetDataRow);
                 }
                 if (targetDataTable.Rows.Count > 0)
                 {
-                    count += targetDataTable.Rows.Count;
+                    result += targetDataTable.Rows.Count;
                     await targetSqlBulkCopy.WriteToServerAsync(targetDataTable);
                     targetDataTable.Rows.Clear();
                 }
-                Log($"Stop");
-                Log($"Complete[{count}]");
+                await Utility.Log(infoLog, $"{threadName}][{sourectTable}][{targetTable}", $"[Complete][{result}]");
             }
             catch (Exception e)
             {
-                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}][{_mapperConfig.SourceTableName}][{_mapperConfig.TargetTableName}]:{e}");
-                File.AppendAllText($"{_mapperConfig.Output}.error", $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]:{e}\n");
+                await Utility.Log(errorLog, $"[{threadName}][{sourectTable}][{targetTable}]", e.ToString());
             }
-        }
-        private object MapperValue(SqlDataReader reader, MapperName mapper)
-        {
-            switch (mapper.MapperType)
-            {
-                case MapperType.None:
-                    {
-                        return reader.GetValue(mapper.SourceName);
-                    }
-                case MapperType.RocDateStringToAdDateTime:
-                    {
-                        var value = reader.GetString(mapper.SourceName);
-                        var datetimeInt = Convert.ToInt32(value) + 19110000;
-                        return DateTime.Parse(datetimeInt.ToString("0000-00-00"));
-                    }
-                default:
-                    {
-                        return reader.GetValue(mapper.SourceName);
-                    }
-            }
-        }
-        private void Log(string message)
-        {
-            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}][{_mapperConfig.SourceTableName}][{_mapperConfig.TargetTableName}]:{message}");
-            File.AppendAllText($"{_mapperConfig.Output}.log", $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]:{message}\n");
+            await Utility.Log(infoLog, $"{threadName}][{sourectTable}][{targetTable}", "[Stop]");
+            return result;
         }
     }
 }

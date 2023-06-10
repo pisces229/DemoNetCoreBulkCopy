@@ -1,11 +1,8 @@
-﻿using CsvHelper.Configuration;
-using CsvHelper;
-using Microsoft.Extensions.Configuration;
+﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SqlServerToSqlServer;
-using System.Globalization;
 using Microsoft.Extensions.Options;
 
 var hostbuilder = Host.CreateDefaultBuilder(args);
@@ -14,10 +11,6 @@ hostbuilder.ConfigureAppConfiguration((hostContext, configurationBuilder) =>
 {
     configurationBuilder.SetBasePath(Directory.GetCurrentDirectory());
     var appsettings = "appsettings.json";
-    //if (!EnvironmentVariable.IsDevelopment())
-    //{
-    //    appsettings = $"appsettings.{EnvironmentVariable.ASPNETCORE_ENVIRONMENT}.json";
-    //}
     configurationBuilder.AddJsonFile(path: appsettings, optional: false, reloadOnChange: false);
     var configuration = configurationBuilder.Build();
 });
@@ -31,43 +24,31 @@ hostbuilder.ConfigureLogging((hostContext, loggingBuilder) =>
 hostbuilder.ConfigureServices((hostContext, services) =>
 {
     services.AddOptions();
-    services.Configure<AppOption>(hostContext.Configuration);
+    services.Configure<AppOption>(hostContext.Configuration.GetSection(AppOption.Section));
+    services.Configure<List<ThreadOption>>(hostContext.Configuration.GetSection(ThreadOption.Section));
+    services.AddTransient<Runner>();
 });
 
 using var host = hostbuilder.Build();
 
 var appOption = host.Services.GetRequiredService<IOptions<AppOption>>().Value;
-var ouput = Directory.CreateDirectory($"{appOption.Output}.{DateTime.Now:yyyyMMdd.HHmmss}");
-var csvConfiguration = new CsvConfiguration(CultureInfo.InvariantCulture)
-{
-    Delimiter = ",",
-    HasHeaderRecord = false,
-};
-var tasks = new List<Task>();
+if (Directory.Exists(appOption.Output)) Directory.Delete(appOption.Output, true);
+Directory.CreateDirectory(appOption.Output);
+var threadOptions = host.Services.GetRequiredService<IOptions<List<ThreadOption>>>().Value;
 
-Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]:Start");
-File.AppendAllText($"{Path.Combine($"{ouput.FullName}", "Log")}.log", $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]:Start\n");
-foreach (var file in appOption.Files)
+var result = 0L;
+var infoLog = Path.Combine($"{appOption.Output}", "app.Log.log");
+await Utility.Log(infoLog, "Log", "[Start]");
+var tasks = new List<Task<long>>();
+foreach (var threadOption in threadOptions)
 {
-    var mapperConfig = new MapperConfig()
-    {
-        ReadSize = appOption.ReadSize,
-        BatchSize = appOption.BatchSize,
-        SourceConnectionString = appOption.SourceConnectionString,
-        TargetConnectionString = appOption.TargetConnectionString,
-        Output = Path.Combine($"{ouput.FullName}", $"{file}"),
-    };
-    using (var streamReader = new StreamReader(Path.Combine(appOption.Input, $"{file}.csv")))
-    using (var csvReader = new CsvReader(streamReader, csvConfiguration))
-    {
-        var records = csvReader.GetRecords<MapperName>().ToList();
-        mapperConfig.SourceTableName = records.First().SourceName;
-        mapperConfig.TargetTableName = records.First().TargetName;
-        mapperConfig.MapperName = records.Skip(1).ToList();
-    }
-    var runner = new Runner(mapperConfig);
-    tasks.Add(runner.Run());
+    var runner = host.Services.GetRequiredService<Runner>();
+    tasks.Add(runner.Run(threadOption));
 }
 Task.WaitAll(tasks.ToArray());
-Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]:Stop");
-File.AppendAllText($"{Path.Combine($"{ouput.FullName}", "Log")}.log", $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}]:Stop\n");
+foreach (var task in tasks)
+{
+    result += await task;
+}
+await Utility.Log(infoLog, "Log", $"[Complete][{result}]");
+await Utility.Log(infoLog, "Log", "[Stop]");

@@ -4,7 +4,7 @@ namespace SqlServerToSqlServer
 {
     internal class AppOption
     {
-        public string[] Files { get; set; } = null!;
+        public static string Section = "App";
         public string Input { get; set; } = null!;
         public string Output { get; set; } = null!;
         public int ReadSize { get; set; }
